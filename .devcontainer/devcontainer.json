@@ -1,0 +1,9 @@
+{
+  "forwardPorts": [5092],
+  "portsAttributes": {
+    "5092": {
+      "visibility": "public",
+      "label": "Backend API"
+    }
+  }
+}
