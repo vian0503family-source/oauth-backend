@@ -1,1 +1,3 @@
 Backend/appsettings.Development.json
+Backend/bin/
+Backend/obj/
