@@ -5,6 +5,7 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Backend.Controllers;
 
@@ -14,14 +15,16 @@ public class AuthController : ControllerBase
 {
     private readonly IConfiguration _config;
     private readonly HttpClient _http;
+    private readonly ILogger<AuthController> _logger;
 
-    public AuthController(IConfiguration config, IHttpClientFactory httpFactory)
+    public AuthController(IConfiguration config, IHttpClientFactory httpFactory,
+                          ILogger<AuthController> logger)
     {
         _config = config;
         _http   = httpFactory.CreateClient();
+        _logger = logger;
     }
 
-    // ── Step 1：前端來拿 Google 授權 URL ──
     // GET /api/auth/google-login-url
     [HttpGet("google-login-url")]
     public IActionResult GetGoogleLoginUrl()
@@ -40,29 +43,26 @@ public class AuthController : ControllerBase
         return Ok(new { url });
     }
 
-    // ── Step 2：前端拿到 auth_code 後送來這裡 ──
     // POST /api/auth/google-callback
     [HttpPost("google-callback")]
     public async Task<IActionResult> GoogleCallback([FromBody] CallbackRequest req)
     {
-        // 2-1：用 auth_code 換 Google Access Token
         var tokenResponse = await ExchangeCodeForToken(req.Code);
         if (tokenResponse == null)
             return BadRequest(new { error = "無法換取 Google Token" });
 
-        // 2-2：用 Google Access Token 取得使用者資料
+        _logger.LogInformation("AccessToken: {token}", tokenResponse.AccessToken);
+
         var userInfo = await GetGoogleUserInfo(tokenResponse.AccessToken);
         if (userInfo == null)
             return BadRequest(new { error = "無法取得使用者資料" });
 
-        // 2-3：產生我們自己的 JWT
         var jwt = GenerateJwt(userInfo);
 
-        // 2-4：寫入 HttpOnly Cookie
         Response.Cookies.Append("access_token", jwt, new CookieOptions
         {
             HttpOnly = true,
-            Secure   = false, // 正式環境改 true
+            Secure   = false,
             SameSite = SameSiteMode.Lax,
             Expires  = DateTimeOffset.UtcNow.AddHours(1)
         });
@@ -79,7 +79,6 @@ public class AuthController : ControllerBase
         });
     }
 
-    // ── Step 3：前端確認登入狀態 ──
     // GET /api/auth/me
     [Authorize]
     [HttpGet("me")]
@@ -92,7 +91,6 @@ public class AuthController : ControllerBase
         return Ok(new { name, email, picture });
     }
 
-    // ── 登出 ──
     // POST /api/auth/logout
     [HttpPost("logout")]
     public IActionResult Logout()
@@ -118,19 +116,30 @@ public class AuthController : ControllerBase
         if (!res.IsSuccessStatusCode) return null;
 
         var json = await res.Content.ReadAsStringAsync();
+        _logger.LogInformation("Token Response: {json}", json);
+
         return JsonSerializer.Deserialize<GoogleTokenResponse>(json,
             new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
     }
 
     private async Task<GoogleUserInfo?> GetGoogleUserInfo(string accessToken)
     {
-        _http.DefaultRequestHeaders.Authorization =
+        var request = new HttpRequestMessage(
+            HttpMethod.Get,
+            "https://www.googleapis.com/oauth2/v2/userinfo"
+        );
+        request.Headers.Authorization =
             new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", accessToken);
 
-        var res = await _http.GetAsync("https://www.googleapis.com/oauth2/v2/userinfo");
+        var res = await _http.SendAsync(request);
+
+        _logger.LogInformation("UserInfo Status: {status}", res.StatusCode);
+
         if (!res.IsSuccessStatusCode) return null;
 
         var json = await res.Content.ReadAsStringAsync();
+        _logger.LogInformation("UserInfo Response: {json}", json);
+
         return JsonSerializer.Deserialize<GoogleUserInfo>(json,
             new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
     }
@@ -146,7 +155,7 @@ public class AuthController : ControllerBase
             new Claim(ClaimTypes.Name,  user.Name),
             new Claim(ClaimTypes.Email, user.Email),
             new Claim("picture",        user.Picture ?? ""),
-            new Claim(JwtRegisteredClaimNames.Sub, user.Id)
+            new Claim(JwtRegisteredClaimNames.Jti, user.Id)
         };
 
         var token = new JwtSecurityToken(
@@ -166,7 +175,10 @@ public record CallbackRequest(string Code);
 
 public class GoogleTokenResponse
 {
-    public string AccessToken  { get; set; } = "";
+    [JsonPropertyName("access_token")]
+    public string AccessToken { get; set; } = "";
+
+    [JsonPropertyName("refresh_token")]
     public string? RefreshToken { get; set; }
 }
 
